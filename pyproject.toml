@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mag_heading"
+version = "0.1.0"
+description = "MagArrow heading error calibration and compensation"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
