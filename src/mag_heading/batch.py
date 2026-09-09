@@ -22,7 +22,8 @@ def compute_noise_metrics(values):
     }
 
 
-def batch_compensate(pre_paths, model, mag_col="Mag", keep_raw=True, out_dir=None):
+def batch_compensate(pre_paths, model, mag_col="Mag", keep_raw=True, out_dir=None,
+                      smooth_hz=None):
     """Apply one calibration model to many -pre.csv files and report before/after
     noise reduction per file, so a calibration's real-world effect can be checked
     across an entire field survey before committing to it (rather than trusting a
@@ -33,7 +34,9 @@ def batch_compensate(pre_paths, model, mag_col="Mag", keep_raw=True, out_dir=Non
 
     for path in pre_paths:
         df = read_pre_csv(path)
-        compensated = apply_compensation(df, model, mag_col=mag_col, keep_raw=keep_raw)
+        compensated = apply_compensation(
+            df, model, mag_col=mag_col, keep_raw=keep_raw, smooth_hz=smooth_hz
+        )
 
         if out_dir is not None:
             os.makedirs(out_dir, exist_ok=True)

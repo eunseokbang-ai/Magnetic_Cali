@@ -771,6 +771,49 @@ story.append(body(
 ))
 story.append(PageBreak())
 
+story.append(h2("8.8 level-survey — 측선간 헤딩/방향 오차 레벨링"))
+story.append(body(
+    "8.1~8.7절의 compensation은 <b>한 파일 안에서</b> 그 순간의 자세(theta, phi)로부터 "
+    "ΔB를 계산해 빼는 방식이다. 이 보정이 얼마나 잘 듣는지는, 그 특정 자세 부근에서 "
+    "캘리브레이션 비행이 얼마나 촘촘하게 샘플을 남겼는지에 달려 있다. 실제 HaeNam M350 "
+    "자료에서는, 잘 검증된 ΔB(theta, phi) 캘리브레이션(turn-only 잡음 +7.3% 개선, "
+    "42/42 파일 양성)을 적용한 뒤에도 survey 전체에서 <b>북행/남행 측선 사이에 약 5.6 nT의 "
+    "일정한 오프셋</b>이 남았다 — 이 플랫폼의 실제 반대 방향 자세(theta 남행 ~63도, "
+    "북행 ~19도)가 캘리브레이션 비행(수평 loiter)이 다룬 자세 범위보다 훨씬 벌어져 있었기 "
+    "때문이다. 캘리브레이션을 여러 방식으로 다시 만들어봐도(더 촘촘한 커버리지, survey "
+    "실제 커버리지에 맞춘 구간, loiter 대신 survey 자체 턴 구간 사용) 이 잔차는 사라지지 "
+    "않고 위치만 옮겨 다녔다 — 캘리브레이션 자체의 한계가 아니라, 그 두 지점에서 fit된 "
+    "곡면의 불확실성이 한계였기 때문이다."
+))
+story.append(body(
+    "이 문제는 더 나은 캘리브레이션 비행으로 풀리지 않는다. survey 자신의 반대 방향 측선들을 "
+    "직접 비교하면 이 오프셋을 훨씬 더 튼튼하게(캘리브레이션 비행 한 번이 아니라 수십 개의 "
+    "독립적인 측선 쌍을 평균해서) 잴 수 있다. <font face=\"Courier\">level-survey</font>는 "
+    "이 아이디어를 구현한다: 여러 파일을 GPS 좌표 하나의 공통 기준으로 합쳐 측선을 검출하고, "
+    "겹치는 국소 구역마다 value = a + b·dx + c·dy + offset·방향으로 평면을 적합해 실제 지형 "
+    "경사(평면 항)와 방향에 따른 계통 오차(offset 항)를 분리한 뒤, 잔차가 가장 작은(가장 "
+    "\"조용한\") 구역들의 offset을 강건 중앙값으로 취합한다. 별도 자력탐사 자료처리 앱의 "
+    "<font face=\"Courier\">processing/leveling.py</font> \"local_plane\" 방식(실측 HaeNam "
+    "M350 블록에서 stripe ratio 93% 감소)을 그대로 이식한 것이다."
+))
+story.append(body(
+    "<b>구역별 offset의 산포가 offset 값 자체보다 크면 이 보정은 자동으로 \"신뢰할 수 없음\" "
+    "경고를 내고 기본적으로 아무 것도 쓰지 않는다</b> — 그 경우 남은 값은 방향에 따른 계통 "
+    "오차가 아니라 측선별 개별 레벨 잡음일 가능성이 높기 때문이다(8.2절의 원칙과 동일: "
+    "지표만 보고 성공을 선언하지 않는다). <font face=\"Courier\">--force</font>로 강제 적용할 "
+    "수 있으나, 출력된 경고와 offset/산포 수치를 먼저 확인해야 한다."
+))
+story.append(body(
+    "사용법: <font face=\"Courier\">python -m mag_heading level-survey --pre-glob "
+    "\"&lt;folder&gt;/*-pre.csv\" --cal project.cal.npz --out-dir &lt;out&gt;</font> "
+    "(캘리브레이션까지 한 번에) 또는 이미 compensate를 끝낸 "
+    "<font face=\"Courier\">-comp.csv</font> 묶음에 <font face=\"Courier\">--cal</font> 없이 "
+    "바로 실행(레벨링만 추가). 적용되면 각 파일에 <font face=\"Courier\">MagLeveled</font> "
+    "컬럼이 새로 추가되어 저장된다 — 기존 <font face=\"Courier\">Mag</font>/"
+    "<font face=\"Courier\">MagComp</font>는 그대로 남는다."
+))
+story.append(PageBreak())
+
 # 9. 문제 해결 ---------------------------------------------------------------
 story.append(h1("9. 문제 해결"))
 story.append(option_table([

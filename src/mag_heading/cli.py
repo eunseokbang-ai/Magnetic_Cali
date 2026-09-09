@@ -3,6 +3,8 @@ import glob
 import os
 import sys
 
+import pandas as pd
+
 from .batch import batch_compensate
 from .calibration import (
     CalibrationModel,
@@ -12,7 +14,9 @@ from .calibration import (
     scan_calibration_candidates,
 )
 from .compensation import apply_compensation, write_comp_csv
-from .io import read_pre_csv, select_segments
+from .io import comp_output_path, read_pre_csv, select_segments
+from .line_leveling import apply_line_leveling, compute_line_leveling
+from .lines import LineDetectionParams, detect_lines, estimate_line_spacing_m
 from .plot import (
     plot_2d_comparison,
     plot_calibration_quality,
@@ -72,7 +76,9 @@ def _cmd_check(args):
 def _cmd_compensate(args):
     model = CalibrationModel.load(args.cal)
     df = read_pre_csv(args.pre)
-    compensated = apply_compensation(df, model, keep_raw=not args.overwrite)
+    compensated = apply_compensation(
+        df, model, keep_raw=not args.overwrite, smooth_hz=args.smooth_hz
+    )
     out_path = write_comp_csv(compensated, args.pre, out_path=args.out)
     print(f"compensated survey written to {out_path} ({len(compensated)} samples)")
 
@@ -88,7 +94,8 @@ def _cmd_batch_compensate(args):
         return
 
     results = batch_compensate(
-        paths, model, keep_raw=not args.overwrite, out_dir=args.out_dir
+        paths, model, keep_raw=not args.overwrite, out_dir=args.out_dir,
+        smooth_hz=args.smooth_hz,
     )
 
     header = f"{'file':<40} {'n':>7} {'raw_noise':>10} {'comp_noise':>11} {'improve':>9}"
@@ -107,6 +114,110 @@ def _cmd_batch_compensate(args):
     poor = [os.path.basename(r["path"]) for r in results if r["motion_noise_improvement_pct"] < 5.0]
     if poor:
         print(f"files with <5% improvement (consider rebuilding the calibration): {', '.join(poor)}")
+
+
+def _leveled_output_path(path):
+    path = str(path)
+    if path.lower().endswith(".csv"):
+        return path[: -len(".csv")] + "-leveled.csv"
+    return path + "-leveled.csv"
+
+
+def _cmd_level_survey(args):
+    """Estimate and (if reliable) remove one survey-wide forward/reverse
+    offset from a whole set of -pre.csv/-comp.csv files together.
+
+    This is deliberately a separate step from `compensate`/`batch-compensate`:
+    the per-sample ΔB(theta, phi) correction only knows about one file's own
+    orientation history, while the offset this command measures is a property
+    of the *whole survey's* opposite-heading lines and needs all of them
+    combined, with one shared local coordinate reference, to estimate
+    robustly. See line_leveling.py's module docstring for why this is needed
+    even after compensation, and lines.py's for the line-detection method.
+    """
+    paths = list(args.pre or [])
+    if args.pre_glob:
+        paths.extend(sorted(glob.glob(args.pre_glob)))
+    if not paths:
+        print("no input files given (use --pre and/or --pre-glob)")
+        return
+
+    model = CalibrationModel.load(args.cal) if args.cal else None
+
+    pieces = []
+    for file_idx, path in enumerate(paths):
+        df = read_pre_csv(path)
+        if model is not None:
+            df = apply_compensation(df, model, keep_raw=True, smooth_hz=args.smooth_hz)
+        df = df.reset_index(drop=True)
+        df["_file_idx"] = file_idx
+        df["_row_idx"] = df.index
+        pieces.append(df)
+
+    value_col = args.value_col
+    if value_col is None:
+        value_col = "MagComp" if all("MagComp" in p.columns for p in pieces) else "Mag"
+    missing = [paths[i] for i, p in enumerate(pieces) if value_col not in p.columns]
+    if missing:
+        print(f"column '{value_col}' not found in: {', '.join(os.path.basename(m) for m in missing)}")
+        return
+    print(f"leveling '{value_col}' across {len(paths)} file(s)")
+
+    # One combined dataframe, one shared local_enu reference (see lines.py) --
+    # detect_lines/estimate_line_spacing_m must see the whole survey at once
+    # or coordinates from different files won't agree.
+    combined = pd.concat(pieces, ignore_index=True)
+    combined = detect_lines(
+        combined,
+        LineDetectionParams(
+            min_line_samples=args.min_line_samples,
+            min_line_length_m=args.min_line_length_m,
+            angle_tolerance_deg=args.angle_tolerance_deg,
+        ),
+    )
+    az = combined.attrs["dominant_azimuth_deg"]
+    spacing = estimate_line_spacing_m(combined, az)
+    n_lines = len(sorted(int(v) for v in combined["line_id"].unique() if v >= 0))
+    spacing_str = f"{spacing:.1f}m" if spacing else "unknown"
+    print(f"detected {n_lines} line(s), dominant azimuth={az:.1f} deg, estimated line spacing={spacing_str}")
+
+    result = compute_line_leveling(
+        combined, value_col, az, spacing,
+        quiet_percentile=args.quiet_percentile,
+        neighborhood_radius_factor=args.neighborhood_radius_factor,
+    )
+
+    if not result.applied:
+        print(f"no correction computed: {result.reason}")
+        return
+
+    print(f"forward/reverse offset: {result.offset_nt:+.3f} nT "
+          f"(spread {result.offset_spread_nt:.3f} nT, from "
+          f"{result.n_neighborhoods_kept}/{result.n_neighborhoods_considered} neighborhoods)")
+    for w in result.warnings:
+        print(f"  warning: {w}")
+
+    if result.warnings and not args.force:
+        print("correction NOT written (see warning above -- the estimate is not reliable "
+              "enough to trust). Pass --force to write it anyway.")
+        return
+
+    combined["MagLeveled"] = apply_line_leveling(combined, value_col, result)
+
+    out_dir = args.out_dir
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    drop_cols = ["_file_idx", "_row_idx", "x", "y", "line_id"]
+    for file_idx, path in enumerate(paths):
+        piece = combined[combined["_file_idx"] == file_idx].sort_values("_row_idx")
+        piece = piece.drop(columns=drop_cols).reset_index(drop=True)
+        default_name = comp_output_path(path) if model is not None else _leveled_output_path(path)
+        out_path = os.path.join(out_dir, os.path.basename(default_name)) if out_dir else default_name
+        out_path = write_comp_csv(piece, path, out_path=out_path)
+        print(f"  {os.path.basename(path)} -> {out_path}")
+
+    print(f"{len(paths)} file(s) written with a MagLeveled column "
+          f"({value_col} + the per-line forward/reverse shift)")
 
 
 def _cmd_scan(args):
@@ -310,6 +421,8 @@ def build_parser():
     p_comp.add_argument("--out", default=None, help="output path (default: <pre>-comp.csv)")
     p_comp.add_argument("--overwrite", action="store_true",
                          help="overwrite the Mag column instead of adding a MagComp column")
+    p_comp.add_argument("--smooth-hz", type=float, default=None,
+                         help="low-pass the heading correction at this frequency (Hz) before subtracting it. The correction is computed per sample from the compass and so carries the compass's broadband noise, while the heading effect itself varies well under 1 Hz -- without this, compensation can add more noise than it removes on straight survey lines (measured: up to -27%% before, +6%% after). Try 1.0 for 10 Hz data; 0.2 over-smooths. Off by default (see manual 8.8)")
     p_comp.set_defaults(func=_cmd_compensate)
 
     p_batch = sub.add_parser(
@@ -325,7 +438,41 @@ def build_parser():
                           help="directory for -comp.csv outputs (default: next to each input file)")
     p_batch.add_argument("--overwrite", action="store_true",
                           help="overwrite the Mag column instead of adding a MagComp column")
+    p_batch.add_argument("--smooth-hz", type=float, default=None,
+                         help="low-pass the heading correction at this frequency (Hz) before subtracting it. The correction is computed per sample from the compass and so carries the compass's broadband noise, while the heading effect itself varies well under 1 Hz -- without this, compensation can add more noise than it removes on straight survey lines (measured: up to -27%% before, +6%% after). Try 1.0 for 10 Hz data; 0.2 over-smooths. Off by default (see manual 8.8)")
     p_batch.set_defaults(func=_cmd_batch_compensate)
+
+    p_level = sub.add_parser(
+        "level-survey",
+        help="estimate and remove one survey-wide forward/reverse (heading-direction) offset "
+             "across a whole set of -pre.csv/-comp.csv files, combined",
+    )
+    p_level.add_argument("--pre", nargs="+", default=None, help="one or more -pre.csv or -comp.csv paths")
+    p_level.add_argument("--pre-glob", default=None,
+                          help="glob pattern for input files, e.g. 'D:/survey/*-comp.csv'")
+    p_level.add_argument("--cal", default=None,
+                          help="optional calibration model (.npz) -- if given, each file is first "
+                               "compensated with it (like `batch-compensate`) before leveling; if "
+                               "omitted, --pre/--pre-glob are assumed to already carry the column "
+                               "to level (e.g. existing -comp.csv files with a MagComp column)")
+    p_level.add_argument("--smooth-hz", type=float, default=None,
+                          help="passed through to compensation when --cal is given, see `compensate --smooth-hz`")
+    p_level.add_argument("--value-col", default=None,
+                          help="column to level (default: MagComp if every file has it, else Mag)")
+    p_level.add_argument("--out-dir", default=None,
+                          help="directory for outputs (default: next to each input file)")
+    p_level.add_argument("--min-line-samples", type=int, default=50)
+    p_level.add_argument("--min-line-length-m", type=float, default=100.0)
+    p_level.add_argument("--angle-tolerance-deg", type=float, default=30.0)
+    p_level.add_argument("--quiet-percentile", type=float, default=40.0,
+                          help="use only the this-percentile-lowest-residual neighborhoods when "
+                               "taking the robust median offset (default 40)")
+    p_level.add_argument("--neighborhood-radius-factor", type=float, default=2.0,
+                          help="neighborhood radius = this * estimated line spacing (default 2.0)")
+    p_level.add_argument("--force", action="store_true",
+                          help="write the correction even when it is flagged unreliable (spread "
+                               ">= offset) -- review the printed warning first")
+    p_level.set_defaults(func=_cmd_level_survey)
 
     p_scan = sub.add_parser(
         "scan", help="slide a fixed-size window over a -pre.csv and rank candidate calibration segments"

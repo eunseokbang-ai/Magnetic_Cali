@@ -84,3 +84,71 @@ def test_write_comp_csv_round_trip(tmp_path):
     assert str(out_path) == str(tmp_path / "survey-pre-comp.csv")
     reloaded = read_pre_csv(out_path)
     np.testing.assert_allclose(reloaded["MagComp"], compensated["MagComp"], atol=1e-6)
+
+
+def _survey_with_compass_noise(n=2000, rate_hz=10.0, seed=0):
+    """A straight-line survey: heading nearly fixed, compass carries broadband noise.
+
+    This is the case where the correction hurts -- the true heading effect is
+    almost constant, so anything the correction adds sample-to-sample is noise.
+    """
+    rng = np.random.default_rng(seed)
+    theta = np.full(n, 0.9) + 0.02 * np.sin(np.arange(n) * 0.01)
+    phi = np.full(n, 0.4) + 0.02 * np.cos(np.arange(n) * 0.008)
+    vec = unit_vector(theta, phi)
+    vec = vec + rng.normal(scale=0.01, size=vec.shape)  # compass noise
+    mag = BASELINE + delta_b_true(theta, phi) + rng.normal(scale=0.02, size=n)
+    t = pd.to_timedelta(np.arange(n) / rate_hz, unit="s")
+    return pd.DataFrame(
+        {
+            "Time": [str(x)[-15:] for x in t],
+            "Mag": mag,
+            "CompassX": vec[:, 0],
+            "CompassY": vec[:, 1],
+            "CompassZ": vec[:, 2],
+        }
+    )
+
+
+def test_smoothing_the_correction_reduces_injected_noise():
+    theta_c, phi_c = _fibonacci_sphere(600, seed=11)
+    model = build_calibration(_make_df(theta_c, phi_c), method="nearest")
+
+    survey = _survey_with_compass_noise(seed=12)
+    raw_jitter = np.std(np.diff(survey["Mag"].to_numpy()))
+
+    unsmoothed = apply_compensation(survey, model)["MagComp"].to_numpy()
+    smoothed = apply_compensation(survey, model, smooth_hz=1.0)["MagComp"].to_numpy()
+
+    # without smoothing the correction adds sample-to-sample noise; with it, less
+    assert np.std(np.diff(unsmoothed)) > raw_jitter
+    assert np.std(np.diff(smoothed)) < np.std(np.diff(unsmoothed))
+
+
+def test_smooth_hz_infers_sample_rate_from_time_column():
+    theta_c, phi_c = _fibonacci_sphere(400, seed=13)
+    model = build_calibration(_make_df(theta_c, phi_c), method="nearest")
+    survey = _survey_with_compass_noise(n=500, rate_hz=10.0, seed=14)
+
+    from mag_heading.compensation import infer_sample_rate_hz
+
+    assert infer_sample_rate_hz(survey) == pytest.approx(10.0, rel=1e-6)
+    apply_compensation(survey, model, smooth_hz=1.0)  # must not raise
+
+
+def test_smooth_hz_without_a_usable_sample_rate_raises():
+    theta_c, phi_c = _fibonacci_sphere(400, seed=15)
+    model = build_calibration(_make_df(theta_c, phi_c), method="nearest")
+    survey = _survey_with_compass_noise(n=500, seed=16).drop(columns=["Time"])
+
+    with pytest.raises(ValueError, match="sample rate"):
+        apply_compensation(survey, model, smooth_hz=1.0)
+
+
+def test_smooth_hz_above_nyquist_raises():
+    theta_c, phi_c = _fibonacci_sphere(400, seed=17)
+    model = build_calibration(_make_df(theta_c, phi_c), method="nearest")
+    survey = _survey_with_compass_noise(n=500, rate_hz=10.0, seed=18)
+
+    with pytest.raises(ValueError, match="Nyquist"):
+        apply_compensation(survey, model, smooth_hz=9.0)

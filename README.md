@@ -161,6 +161,38 @@ python -m mag_heading batch-compensate --pre-glob "D:/HaeNam_Mag/20260715/*-pre.
 특정 파일에서만 개선이 약하면 그 구간의 헤딩이 캘리브레이션에 충분히 담기지 않았을
 가능성이 높다 — `scan`으로 다시 구간을 찾아본다.
 
+## 측선간 헤딩/방향 오차 레벨링 (level-survey)
+
+`compensate`/`batch-compensate`의 ΔB(θ,φ) 보정은 **한 파일 안에서** 그 순간의 자세로부터
+헤딩 효과를 제거한다. 하지만 이 보정이 캘리브레이션 비행에서 충분히 다루지 못한 특정 자세
+(예: 실제 survey의 정방향/역방향 측선이 캘리브레이션 비행보다 훨씬 큰 pitch 차이로 날았을 때)
+근처에서는, survey 전체에 걸쳐 **정방향과 역방향 측선 사이에 남는 일정한 오프셋**이 생길 수
+있다 — 그리드에서 줄무늬(striping)로 보이는 원인 중 하나다. 이 오프셋은 한 파일의 자세
+이력만으로는 알 수 없고, **survey 전체의 반대 방향 측선들을 직접 비교**해야 추정할 수 있다.
+
+`level-survey`는 여러 파일(하나의 survey 전체)을 GPS 좌표로 합쳐 측선을 자동 검출하고,
+공간적으로 겹치는 여러 국소 구역에서 "실제 지형 경사"와 "방향에 따른 계통 오차"를 분리해
+낸 뒤, 그 오차가 정말로 방향에 의한 것인지(구역별 오프셋의 산포가 오프셋 자체보다 작은지)
+자체 판정한다. 신뢰할 수 없다고 판단되면(산포가 오프셋보다 크면) **기본적으로 아무 것도
+쓰지 않고 경고만 출력**한다 — `--force`로 강제할 수 있지만, 그 전에 출력된 경고를 확인해야
+한다.
+
+```bash
+# --cal을 주면 compensate까지 한 번에 한다 (캘리브레이션 → 레벨링)
+python -m mag_heading level-survey --pre-glob "D:/HaeNam_Mag/20260715/*-pre.csv" \
+    --cal project.cal.npz --smooth-hz 1.0 --out-dir D:/HaeNam_Mag/20260715/leveled
+
+# 이미 compensate까지 끝낸 -comp.csv들에 레벨링만 추가로 적용
+python -m mag_heading level-survey --pre-glob "D:/HaeNam_Mag/20260715/compensated/*-comp.csv" \
+    --out-dir D:/HaeNam_Mag/20260715/leveled
+```
+
+레벨링할 값은 `--value-col`로 지정하며, 기본값은 모든 파일에 `MagComp`가 있으면 `MagComp`,
+아니면 `Mag`이다. 적용되면 원본 값에 방향별 상수 오프셋을 더한 `MagLeveled` 컬럼이 각
+파일에 새로 추가되어 저장된다(기존 `Mag`/`MagComp`는 그대로 남는다 — vendor 프로그램의
+"Keep Raw Data" 관례와 동일). 이 방법은 `processing/leveling.py`의 "local_plane" 방식(별도
+자력탐사 자료처리 앱에서 이미 실측 검증된 방법)을 그대로 이식한 것이다.
+
 ## GUI
 
 **`Run MagHeading GUI.bat`를 더블클릭하면 된다** — 터미널/명령어 입력 없이 바로 실행된다.
