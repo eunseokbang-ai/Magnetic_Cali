@@ -155,6 +155,42 @@ def test_level_survey_declines_with_too_few_lines(tmp_path, capsys):
     assert not list(out_dir.glob("*"))
 
 
+def test_level_survey_still_writes_compensation_when_leveling_is_unreliable(tmp_path, capsys):
+    """A --cal compensation that succeeded must not be thrown away just
+    because the separate forward/reverse leveling step declines (too few
+    lines here) -- found missing when generating real M350 output: the
+    command used to write nothing at all in that case."""
+    rng = np.random.default_rng(0)
+    theta = np.arccos(1 - 2 * (np.arange(200) + 0.5) / 200)
+    phi = (2 * np.pi * np.arange(200) / ((1 + 5**0.5) / 2)) % (2 * np.pi)
+    vec = np.column_stack([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)])
+    cal_df = pd.DataFrame({
+        "Mag": 50000.0 + 2.0 * np.cos(theta) + rng.normal(scale=0.01, size=200),
+        "CompassX": vec[:, 0], "CompassY": vec[:, 1], "CompassZ": vec[:, 2],
+    })
+    from mag_heading.calibration import build_calibration
+    model = build_calibration(cal_df, method="nearest")
+    cal_path = tmp_path / "test.cal.npz"
+    model.save(str(cal_path))
+
+    df = _survey_df(n_lines=2, offset_nt=6.0)
+    paths = _write_split(df, tmp_path, n_files=1)
+    out_dir = tmp_path / "out"
+
+    cli.main([
+        "level-survey", "--pre", *paths, "--cal", str(cal_path), "--out-dir", str(out_dir),
+    ])
+    out = capsys.readouterr().out
+    assert "no correction computed" in out
+    assert "MagLeveled NOT added" not in out  # never got far enough to compute one
+
+    written = list(out_dir.glob("*"))
+    assert len(written) == 1
+    result_df = read_pre_csv(str(written[0]))
+    assert "MagComp" in result_df.columns
+    assert "MagLeveled" not in result_df.columns
+
+
 def test_level_survey_no_input_files(capsys):
     cli.main(["level-survey"])
     out = capsys.readouterr().out

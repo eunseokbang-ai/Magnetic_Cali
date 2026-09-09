@@ -188,21 +188,32 @@ def _cmd_level_survey(args):
     )
 
     if not result.applied:
-        print(f"no correction computed: {result.reason}")
+        print(f"no correction computed (forward/reverse offset): {result.reason}")
+    else:
+        print(f"forward/reverse offset: {result.offset_nt:+.3f} nT "
+              f"(spread {result.offset_spread_nt:.3f} nT, from "
+              f"{result.n_neighborhoods_kept}/{result.n_neighborhoods_considered} neighborhoods)")
+        for w in result.warnings:
+            print(f"  warning: {w}")
+
+    # Whether to also write a MagLeveled column: only when the estimate is
+    # both computed and (reliable or forced). This is independent of
+    # whether --cal compensation happened -- an unreliable/undecided
+    # leveling estimate should not throw away a perfectly good MagComp
+    # compensation that was already computed above.
+    add_leveled = result.applied and (not result.warnings or args.force)
+    if result.applied and result.warnings and not args.force:
+        print("MagLeveled NOT added (see warning above -- the estimate is not reliable "
+              "enough to trust). Pass --force to add it anyway.")
+
+    if model is None and not add_leveled:
+        # Nothing was computed (no --cal) and nothing reliable to level --
+        # writing files identical to the input would just be clutter.
+        print("nothing to write (no --cal given and no reliable leveling correction)")
         return
 
-    print(f"forward/reverse offset: {result.offset_nt:+.3f} nT "
-          f"(spread {result.offset_spread_nt:.3f} nT, from "
-          f"{result.n_neighborhoods_kept}/{result.n_neighborhoods_considered} neighborhoods)")
-    for w in result.warnings:
-        print(f"  warning: {w}")
-
-    if result.warnings and not args.force:
-        print("correction NOT written (see warning above -- the estimate is not reliable "
-              "enough to trust). Pass --force to write it anyway.")
-        return
-
-    combined["MagLeveled"] = apply_line_leveling(combined, value_col, result)
+    if add_leveled:
+        combined["MagLeveled"] = apply_line_leveling(combined, value_col, result)
 
     out_dir = args.out_dir
     if out_dir:
@@ -216,8 +227,11 @@ def _cmd_level_survey(args):
         out_path = write_comp_csv(piece, path, out_path=out_path)
         print(f"  {os.path.basename(path)} -> {out_path}")
 
-    print(f"{len(paths)} file(s) written with a MagLeveled column "
-          f"({value_col} + the per-line forward/reverse shift)")
+    if add_leveled:
+        print(f"{len(paths)} file(s) written with a MagLeveled column "
+              f"({value_col} + the per-line forward/reverse shift)")
+    else:
+        print(f"{len(paths)} file(s) written with {value_col} (no MagLeveled column added)")
 
 
 def _cmd_scan(args):
