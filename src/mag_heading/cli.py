@@ -3,8 +3,6 @@ import glob
 import os
 import sys
 
-import pandas as pd
-
 from .batch import batch_compensate
 from .calibration import (
     CalibrationModel,
@@ -14,9 +12,9 @@ from .calibration import (
     scan_calibration_candidates,
 )
 from .compensation import apply_compensation, write_comp_csv
-from .io import comp_output_path, read_pre_csv, select_segments
-from .line_leveling import apply_line_leveling, compute_line_leveling
-from .lines import LineDetectionParams, detect_lines, estimate_line_spacing_m
+from .io import read_pre_csv, select_segments
+from .lines import LineDetectionParams
+from .survey_leveling import level_survey_files
 from .plot import (
     plot_2d_comparison,
     plot_calibration_quality,
@@ -98,14 +96,25 @@ def _cmd_batch_compensate(args):
         smooth_hz=args.smooth_hz,
     )
 
-    header = f"{'file':<40} {'n':>7} {'raw_noise':>10} {'comp_noise':>11} {'improve':>9}"
+    def _pct(v):
+        return f"{v:>8.1f}%" if v is not None else f"{'-':>9}"
+
+    header = (f"{'file':<40} {'n':>7} {'raw_noise':>10} {'comp_noise':>11} {'improve':>9} "
+              f"{'turns':>9} {'lines':>9}")
     print(header)
+    failed = [r for r in results if "error" in r]
+    results = [r for r in results if "error" not in r]
     for r in results:
         name = os.path.basename(r["path"])
         print(
             f"{name:<40.40} {r['n_samples']:>7} {r['raw_motion_noise_std_nT']:>10.4g} "
-            f"{r['comp_motion_noise_std_nT']:>11.4g} {r['motion_noise_improvement_pct']:>8.1f}%"
+            f"{r['comp_motion_noise_std_nT']:>11.4g} {_pct(r['motion_noise_improvement_pct'])} "
+            f"{_pct(r['turn_improvement_pct'])} {_pct(r['line_improvement_pct'])}"
         )
+    for r in failed:
+        print(f"{os.path.basename(r['path']):<40.40} FAILED: {r['error']}")
+    if not results:
+        return
 
     improvements = [r["motion_noise_improvement_pct"] for r in results]
     print()
@@ -114,13 +123,6 @@ def _cmd_batch_compensate(args):
     poor = [os.path.basename(r["path"]) for r in results if r["motion_noise_improvement_pct"] < 5.0]
     if poor:
         print(f"files with <5% improvement (consider rebuilding the calibration): {', '.join(poor)}")
-
-
-def _leveled_output_path(path):
-    path = str(path)
-    if path.lower().endswith(".csv"):
-        return path[: -len(".csv")] + "-leveled.csv"
-    return path + "-leveled.csv"
 
 
 def _cmd_level_survey(args):
@@ -138,100 +140,25 @@ def _cmd_level_survey(args):
     paths = list(args.pre or [])
     if args.pre_glob:
         paths.extend(sorted(glob.glob(args.pre_glob)))
-    if not paths:
-        print("no input files given (use --pre and/or --pre-glob)")
-        return
 
-    model = CalibrationModel.load(args.cal) if args.cal else None
-
-    pieces = []
-    for file_idx, path in enumerate(paths):
-        df = read_pre_csv(path)
-        if model is not None:
-            df = apply_compensation(df, model, keep_raw=True, smooth_hz=args.smooth_hz)
-        df = df.reset_index(drop=True)
-        df["_file_idx"] = file_idx
-        df["_row_idx"] = df.index
-        pieces.append(df)
-
-    value_col = args.value_col
-    if value_col is None:
-        value_col = "MagComp" if all("MagComp" in p.columns for p in pieces) else "Mag"
-    missing = [paths[i] for i, p in enumerate(pieces) if value_col not in p.columns]
-    if missing:
-        print(f"column '{value_col}' not found in: {', '.join(os.path.basename(m) for m in missing)}")
-        return
-    print(f"leveling '{value_col}' across {len(paths)} file(s)")
-
-    # One combined dataframe, one shared local_enu reference (see lines.py) --
-    # detect_lines/estimate_line_spacing_m must see the whole survey at once
-    # or coordinates from different files won't agree.
-    combined = pd.concat(pieces, ignore_index=True)
-    combined = detect_lines(
-        combined,
-        LineDetectionParams(
+    model = CalibrationModel.load(args.cal) if args.cal and paths else None
+    level_survey_files(
+        paths,
+        model=model,
+        smooth_hz=args.smooth_hz,
+        value_col=args.value_col,
+        out_dir=args.out_dir,
+        force=args.force,
+        line_params=LineDetectionParams(
             min_line_samples=args.min_line_samples,
             min_line_length_m=args.min_line_length_m,
             angle_tolerance_deg=args.angle_tolerance_deg,
+            course_lag_m=args.course_lag_m if args.course_lag_m > 0 else None,
         ),
-    )
-    az = combined.attrs["dominant_azimuth_deg"]
-    spacing = estimate_line_spacing_m(combined, az)
-    n_lines = len(sorted(int(v) for v in combined["line_id"].unique() if v >= 0))
-    spacing_str = f"{spacing:.1f}m" if spacing else "unknown"
-    print(f"detected {n_lines} line(s), dominant azimuth={az:.1f} deg, estimated line spacing={spacing_str}")
-
-    result = compute_line_leveling(
-        combined, value_col, az, spacing,
         quiet_percentile=args.quiet_percentile,
         neighborhood_radius_factor=args.neighborhood_radius_factor,
+        log=print,
     )
-
-    if not result.applied:
-        print(f"no correction computed (forward/reverse offset): {result.reason}")
-    else:
-        print(f"forward/reverse offset: {result.offset_nt:+.3f} nT "
-              f"(spread {result.offset_spread_nt:.3f} nT, from "
-              f"{result.n_neighborhoods_kept}/{result.n_neighborhoods_considered} neighborhoods)")
-        for w in result.warnings:
-            print(f"  warning: {w}")
-
-    # Whether to also write a MagLeveled column: only when the estimate is
-    # both computed and (reliable or forced). This is independent of
-    # whether --cal compensation happened -- an unreliable/undecided
-    # leveling estimate should not throw away a perfectly good MagComp
-    # compensation that was already computed above.
-    add_leveled = result.applied and (not result.warnings or args.force)
-    if result.applied and result.warnings and not args.force:
-        print("MagLeveled NOT added (see warning above -- the estimate is not reliable "
-              "enough to trust). Pass --force to add it anyway.")
-
-    if model is None and not add_leveled:
-        # Nothing was computed (no --cal) and nothing reliable to level --
-        # writing files identical to the input would just be clutter.
-        print("nothing to write (no --cal given and no reliable leveling correction)")
-        return
-
-    if add_leveled:
-        combined["MagLeveled"] = apply_line_leveling(combined, value_col, result)
-
-    out_dir = args.out_dir
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    drop_cols = ["_file_idx", "_row_idx", "x", "y", "line_id"]
-    for file_idx, path in enumerate(paths):
-        piece = combined[combined["_file_idx"] == file_idx].sort_values("_row_idx")
-        piece = piece.drop(columns=drop_cols).reset_index(drop=True)
-        default_name = comp_output_path(path) if model is not None else _leveled_output_path(path)
-        out_path = os.path.join(out_dir, os.path.basename(default_name)) if out_dir else default_name
-        out_path = write_comp_csv(piece, path, out_path=out_path)
-        print(f"  {os.path.basename(path)} -> {out_path}")
-
-    if add_leveled:
-        print(f"{len(paths)} file(s) written with a MagLeveled column "
-              f"({value_col} + the per-line forward/reverse shift)")
-    else:
-        print(f"{len(paths)} file(s) written with {value_col} (no MagLeveled column added)")
 
 
 def _cmd_scan(args):
@@ -478,6 +405,10 @@ def build_parser():
     p_level.add_argument("--min-line-samples", type=int, default=50)
     p_level.add_argument("--min-line-length-m", type=float, default=100.0)
     p_level.add_argument("--angle-tolerance-deg", type=float, default=30.0)
+    p_level.add_argument("--course-lag-m", type=float, default=20.0,
+                         help="flight distance (m) over which the GPS course is estimated for line/turn "
+                              "detection (default 20). 0 = the pre-2026-11-12 extent-based rule, which "
+                              "merges turns into lines on north-south/narrow surveys")
     p_level.add_argument("--quiet-percentile", type=float, default=40.0,
                           help="use only the this-percentile-lowest-residual neighborhoods when "
                                "taking the robust median offset (default 40)")

@@ -576,22 +576,28 @@ story.append(body(
 ))
 story.append(h2("7.1 화면 구성"))
 story.extend(bullets([
-    "<b>상단</b>: -pre.csv 파일 로드 버튼",
-    "<b>왼쪽 탭 4개</b>: \"Segment Selection\"(Mag 시계열 + <b>GPS 비행 경로 플롯이 나란히 표시되고, "
-    "선택 구간이 경로 위에 빨간 점으로 하이라이트</b> — 벤더 프로그램의 커서 조작과 동일한 방식에 "
-    "측선상 위치 확인 기능을 더한 것; GPS 좌표가 없는 파일은 이 패널이 생략됨). 오른쪽 패널의 "
-    "\"Add segment\" 버튼으로 드래그 선택을 계속 추가할 수 있고, 추가된 구간은 시계열 위에 초록 "
-    "띠로, 경로 위에는 초록 점으로 표시된다(아직 추가 안 한 현재 드래그는 빨간 점) — 8.6절 다구간 "
-    "캘리브레이션 기능의 GUI 버전. \"Calibration "
-    "Quality\"(그림 2와 동일한 자기평탄도 플롯 — 캘리브레이션 구간 자체만), \"2D Comparison\""
-    "(compensation 적용 후 <b>raw vs compensated 시간영역 그래프가 위, 2D 지도 비교가 아래</b>에 "
-    "함께 표시 — 벤더 Module 4 스타일로 survey 전체에서 compensation 효과를 확인), "
-    "\"Batch\"(여러 파일 일괄 compensation + 개선율 비교)",
-    "<b>오른쪽 패널</b>: 구간 선택(Add/Remove/Clear segment, 추가된 구간 목록, \"center segments\" "
-    "체크박스), 모델 파라미터(method/grid resolution/coverage threshold/max variation/ "
-    "trim outliers), Scan 버튼과 후보 리스트(주 헤딩 커버 여부 표시), Build/Save/Load Calibration, "
-    "Compensate &amp; Save",
-    "<b>하단</b>: 실행 로그",
+    "<b>상단</b>: -pre.csv 파일 로드 버튼, 현재 캘리브레이션 이름, 작업 상태와 진행 표시. 오래 걸리는 "
+    "작업(scan, auto-build, 보정, batch, leveling)은 별도 스레드에서 돌아 창이 멈추지 않는다.",
+    "<b>\"Segment Selection\" 탭</b>: Mag 시계열과 <b>GPS 비행 경로가 나란히 표시되고, 선택 구간이 "
+    "경로 위에 빨간 점으로 하이라이트</b>된다(GPS 좌표가 없으면 경로 패널 생략). \"Add segment\"로 "
+    "드래그 선택을 계속 추가할 수 있고 추가된 구간은 초록 띠/초록 점으로 표시된다 — 8.6절 다구간 "
+    "캘리브레이션의 GUI 버전.",
+    "<b>\"Calibration Quality\" 탭</b>: 맨 위에 <b>PASS/FAIL 요약</b>(auto-build와 같은 세 기준: "
+    "self-comp p2p, 주 헤딩 커버, survey 커버리지), 그 아래 자기평탄도 플롯(그림 2와 동일)과 "
+    "<b>heading 커버리지 그림</b>(방위각–극각 평면에 survey 헤딩을 찍고, 캘리브레이션이 덮지 못한 "
+    "곳을 빨간 점으로 표시).",
+    "<b>\"Compensation Result\" 탭</b>: 전체/선회만/측선만의 motion-noise 변화율 요약, raw vs "
+    "compensated 시계열(벤더 Module 4 스타일), 2D 지도 세 장(raw, compensated, 제거된 보정량 "
+    "raw - compensated). 지도 색 범위는 상·하위 2%에서 잘라 이상값 몇 개가 지도 전체를 한 색으로 "
+    "만들지 않게 하고, 비행하지 않은 곳(자료에서 20 m 이상)은 비워 둔다.",
+    "<b>\"Batch / Leveling\" 탭</b>: 여러 파일 일괄 보정과 파일별 전체/선회/측선 개선율 표, 그 "
+    "아래 level-survey(8.8절).",
+    "<b>오른쪽 패널</b>: 1. 구간 선택, 모델 파라미터, Scan, Auto-build, 2. Calibration(Build/Save/"
+    "Load/Export vendor -cal.csv, PASS/FAIL 보고), 3. Compensation(평활화, Preview, "
+    "Compensate &amp; save). 패널과 아래 로그는 결과 그림이 커져도 제자리에 남는다.",
+    "<b>하단</b>: 실행 로그(경고는 주황, 오류는 빨강).",
+    "매개변수와 마지막 폴더는 <font face=\"Courier\">~/.mag_heading_gui.json</font>에 저장돼 다음 "
+    "실행 때 복원된다.",
 ]))
 story.append(h2("7.2 사용 순서"))
 story.extend([Paragraph(f"{i}. {t}", styles["Body"]) for i, t in enumerate([
@@ -610,12 +616,20 @@ story.extend([Paragraph(f"{i}. {t}", styles["Body"]) for i, t in enumerate([
     "리포트와 Calibration Quality 탭 플롯이 갱신된다. 필요하면 \"trim outliers\" 체크박스를 켠다.",
     "결과가 만족스러우면 \"Save calibration...\"으로 <font face=\"Courier\">.npz</font> 파일로 "
     "저장한다 (이후 같은 프로젝트의 다른 파일에는 \"Load calibration...\"으로 재사용).",
-    "\"Compensate &amp; save...\"로 현재 로드된 survey 전체에 모델을 적용하고 "
-    "<font face=\"Courier\">-comp.csv</font>를 저장한다 — GPS 좌표가 있으면 2D Comparison 탭에 "
-    "전후 비교 지도가 뜬다.",
-    "\"Batch\" 탭에서 \"Add files...\" 또는 \"Add folder...\"로 현장에서 취득한 모든 파일을 불러온 "
-    "뒤 \"Compensate All\"을 누르면, 파일별 motion-noise 개선율 표가 나온다. 개선율이 고르게 좋으면 "
-    "캘리브레이션을 채택하고, 낮은 파일이 있으면 2~3단계로 돌아가 구간을 다시 골라본다.",
+    "\"3. Compensation\"의 <b>\"smooth correction\"(기본 켬, 1 Hz)</b>을 확인한다 — 보정량을 "
+    "저역통과해 측선 구간에 compass 잡음을 더하지 않게 한다(CLI의 --smooth-hz). \"Preview\"로 "
+    "저장 없이 결과를 먼저 보고, \"Compensate &amp; save...\"로 "
+    "<font face=\"Courier\">-comp.csv</font>를 저장한다(기본 파일명 제안). 결과 탭의 "
+    "<b>turns(선회만) 개선율</b>이 핵심 확인 지표다 — 선회는 heading 오차가 가장 큰 곳이고, "
+    "lines(측선만)는 보정이 잡음을 늘리지 않아야 하는 곳이다. 다른 파일을 열어도 캘리브레이션은 "
+    "유지되므로, 같은 프로젝트의 파일을 차례로 열어 보정할 수 있다.",
+    "\"Batch / Leveling\" 탭에서 \"Add files...\" 또는 \"Add folder...\"(이름에 -pre가 들어간 "
+    "CSV, 예: -pre.csv, -pre-LPF.csv; -comp/-leveled 출력은 제외)로 현장의 모든 파일을 불러와 "
+    "\"Compensate All\"을 누른다. 파일별 전체/선회/측선 개선율 표가 나오고, 나빠진 파일은 주황, "
+    "읽지 못한 파일은 빨간 행으로 표시된다(실패한 파일이 있어도 나머지는 계속 처리). 선회 "
+    "개선율이 고르게 양수면 캘리브레이션을 채택하고, 아니면 2~3단계로 돌아간다.",
+    "필요하면 같은 탭 아래의 \"Level survey\"로 정·역방향 측선 레벨링을 실행한다(8.8절). 이미 "
+    "-comp.csv인 파일이면 \"compensate first\"를 끈 채로 실행한다.",
 ], start=1)])
 story.append(PageBreak())
 
@@ -632,7 +646,7 @@ story.append(body(
     "MagArrow는 total-field(스칼라) 자력계이므로 이상적으로는 방향과 무관하게 같은 값을 읽어야 "
     "하지만, nonlinear Zeeman shift 등 물리적 원인과 센서/플랫폼의 자성 재질로 인해 실제 판독값은 "
     "헤딩의 함수 ΔB(θ, φ)만큼 흔들린다. 이 프로그램의 목표는 ΔB(θ, φ)를 추정해서 매 샘플의 "
-    "Mag 판독값에서 빼주는 것이다: <font face=\"Courier\">MagComp = Mag − ΔB(θ, φ)</font>."
+    "Mag 판독값에서 빼주는 것이다: <font face=\"Courier\">MagComp = Mag - ΔB(θ, φ)</font>."
 ))
 story.append(h2("8.3 캘리브레이션 모델: 왜 그리드 기반 평균인가"))
 story.append(body(
@@ -776,7 +790,7 @@ story.append(body(
     "8.1~8.7절의 compensation은 <b>한 파일 안에서</b> 그 순간의 자세(theta, phi)로부터 "
     "ΔB를 계산해 빼는 방식이다. 이 보정이 얼마나 잘 듣는지는, 그 특정 자세 부근에서 "
     "캘리브레이션 비행이 얼마나 촘촘하게 샘플을 남겼는지에 달려 있다. 실제 HaeNam M350 "
-    "자료에서는, 잘 검증된 ΔB(theta, phi) 캘리브레이션(turn-only 잡음 +7.3% 개선, "
+    "자료에서는, 잘 검증된 ΔB(theta, phi) 캘리브레이션(선회 구간 잡음 +28% 개선, "
     "42/42 파일 양성)을 적용한 뒤에도 survey 전체에서 <b>북행/남행 측선 사이에 약 5.6 nT의 "
     "일정한 오프셋</b>이 남았다 — 이 플랫폼의 실제 반대 방향 자세(theta 남행 ~63도, "
     "북행 ~19도)가 캘리브레이션 비행(수평 loiter)이 다룬 자세 범위보다 훨씬 벌어져 있었기 "
@@ -812,6 +826,18 @@ story.append(body(
     "컬럼이 새로 추가되어 저장된다 — 기존 <font face=\"Courier\">Mag</font>/"
     "<font face=\"Courier\">MagComp</font>는 그대로 남는다."
 ))
+story.append(body(
+    "<b>측선 검출 (2026-11-12 수정)</b>: 측선과 선회는 GPS 궤적만으로 나눈다. 진행 방향은 비행 "
+    "거리 약 20 m에 걸친 위치 변화로 판단하고(<font face=\"Courier\">--course-lag-m</font>), "
+    "측선 축에서 벗어나거나 진행 방향이 뒤집히는 곳에서 측선을 끊는다. 이전 규칙은 이 구간을 "
+    "측량의 동서 폭으로 정해서, 남북 방향이거나 폭이 좁은 측량에서는 구간이 수십 초~수 분으로 "
+    "커져 선회가 측선에 묻혔다. M350 42개 파일 블록에서 이전 규칙은 측선 84개 중 39개를 두 파일에 "
+    "걸쳐 이어 붙였고 측선 간격을 59.8 m로 추정했다(실제 약 50 m). 새 규칙은 측선 87개, 간격 "
+    "49.7 m이고, 레벨링 결과는 거의 같다(Mag +5.43 → +5.59 nT, MagComp -0.86 → -0.86 nT, 여전히 "
+    "신뢰불가 판정). 같은 규칙으로 선회 구간을 다시 나눠 재면 이 캘리브레이션의 선회 구간 잡음 "
+    "개선은 +28%(42/42 파일)이다 — 이전에 기록된 +7.3%는 직선 구간 상당 부분을 선회로 잘못 센 "
+    "값이다. 이전 규칙은 <font face=\"Courier\">--course-lag-m 0</font>으로 재현할 수 있다."
+))
 story.append(PageBreak())
 
 # 9. 문제 해결 ---------------------------------------------------------------
@@ -833,9 +859,11 @@ story.append(option_table([
      "다루지 못한 헤딩(예: 다른 방향의 측선)을 포함하고 있을 가능성이 높다. 해당 파일도 포함해서 "
      "<font face=\"Courier\">scan</font>을 survey_df로 다시 돌리거나, 그 파일 자체의 헤딩 분포를 "
      "<font face=\"Courier\">plot-heading</font>으로 확인한다."],
-    ["no *-pre.csv files found in <folder> (GUI)", "\"Add folder...\"는 폴더 안에서 파일명이 "
-     "정확히 <font face=\"Courier\">*-pre.csv</font> 패턴인 파일만 찾는다. 파일명이 다르면 "
-     "\"Add files...\"로 직접 선택한다."],
+    ["no -pre CSV files found in <folder> (GUI)", "\"Add folder...\"는 이름에 "
+     "<font face=\"Courier\">-pre</font>가 들어간 CSV(예: -pre.csv, -pre-LPF.csv)를 찾고, 이 도구의 "
+     "출력(-comp, -leveled)은 뺀다. 파일명이 다르면 \"Add files...\"로 직접 선택한다."],
+    ["GUI 결과 탭의 turns 개선율이 \"-\"로 나옴", "GPS 좌표가 없거나 선회 구간이 너무 짧아(10개 "
+     "샘플 미만) 선회/측선을 나눌 수 없는 파일이다. 전체(all) 개선율만 참고한다."],
 ], col_widths=[CONTENT_W * 0.35, CONTENT_W * 0.65]))
 story.append(spacer(20))
 

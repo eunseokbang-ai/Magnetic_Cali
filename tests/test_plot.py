@@ -135,3 +135,17 @@ def test_plot_compensation_timeseries_single_line_when_comp_col_missing():
     fig = plot_compensation_timeseries(df)
     ax = fig.axes[0]
     assert len(ax.lines) == 1
+
+
+def test_plot_heading_coverage_marks_uncovered_survey_headings():
+    from mag_heading.calibration import build_calibration
+    from mag_heading.plot import plot_heading_coverage
+
+    df = _make_survey_df(n=200)
+    model = build_calibration(df.iloc[:60].reset_index(drop=True))
+    fig = plot_heading_coverage(model, survey_df=df)
+    labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    assert any("NOT covered" in s for s in labels)
+    assert any("calibration" in s for s in labels)
+    fig_no_survey = plot_heading_coverage(model)
+    assert len(fig_no_survey.axes[0].collections) == 1

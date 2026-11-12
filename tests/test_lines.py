@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mag_heading.lines import detect_lines, direction_groups, estimate_line_spacing_m
+from mag_heading.lines import LineDetectionParams, detect_lines, direction_groups, estimate_line_spacing_m
 
 EARTH_RADIUS_M = 6371000.0
 LAT0, LON0 = 34.5, 126.5
@@ -115,3 +115,23 @@ def test_short_stray_segments_are_excluded():
     assert not np.any(tail_ids >= 0) or len(set(tail_ids[tail_ids >= 0])) == 0 or True  # blip too short to qualify
     line_ids = sorted(int(v) for v in lined["line_id"].unique() if v >= 0)
     assert len(line_ids) == 4
+
+
+def test_course_lag_is_path_based_for_narrow_north_south_survey():
+    """A narrow N-S survey (small east-west extent) used to get a course lag of
+    len/4 samples from the old extent-based rule, so the line/turn labels came
+    out mostly wrong (the real 7/15 HaeNam file: 7% of samples on a line). The
+    path-length default must label line samples as lines and turns as turns."""
+    n_per_line, n_turn = 1500, 23  # _turn_points(n=25) minus its two endpoints
+    df, _x, _y = _boustrophedon_survey(n_lines=3, line_length=1500.0, spacing=25.0, n_per_line=n_per_line)
+    truth = np.concatenate([np.ones(n_per_line), np.zeros(n_turn), np.ones(n_per_line),
+                            np.zeros(n_turn), np.ones(n_per_line)]).astype(bool)
+    assert len(truth) == len(df)
+
+    new = detect_lines(df)
+    legacy = detect_lines(df, LineDetectionParams(course_lag_m=None))
+    new_acc = np.mean((new["line_id"].to_numpy() >= 0) == truth)
+    legacy_acc = np.mean((legacy["line_id"].to_numpy() >= 0) == truth)
+    assert len([v for v in new["line_id"].unique() if v >= 0]) == 3
+    assert new_acc > 0.97
+    assert new_acc > legacy_acc

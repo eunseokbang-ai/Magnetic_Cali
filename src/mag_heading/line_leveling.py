@@ -7,7 +7,7 @@ correction, not a tuning of it: that correction is fit from a *calibration
 flight* covering many orientations, then applied per sample from the
 *survey's* actual orientation at that instant. It is excellent at removing
 the fast, sample-to-sample wobble a changing attitude causes (validated at
-+7.3% turn-only noise reduction, 42/42 files positive, on the 2026-09
++28% turn-only noise reduction, 42/42 files positive, on the 2026-09
 HaeNam M350 data) but it is only as good, at any one (theta, phi), as how
 well the calibration flight's own attitude range and sample density
 covered that specific direction. On that same dataset the two opposite

@@ -6,7 +6,7 @@ noise a changing *sensor orientation* injects sample-to-sample; it does
 not, by itself, guarantee that two lines flown in opposite directions come
 back reading the same absolute level. Real M350 data from the 2026-09
 HaeNam survey showed why the two are different problems: even after a
-well-validated ΔB(theta, phi) calibration (turn-only noise +7.3%, 42/42
+well-validated ΔB(theta, phi) calibration (turn-only noise +28%, 42/42
 positive), the compensated file-level survey still had a ~5.6 nT
 forward/reverse offset between north- and south-bound lines, because the
 calibration flight's own attitude range didn't include the drone's real,
@@ -41,6 +41,16 @@ class LineDetectionParams:
     # heading may differ from straight-along/straight-back before the
     # split is judged to be a turn rather than a new line.
     angle_tolerance_deg: float = 30.0
+    # Distance travelled (m) over which the GPS course is estimated when
+    # deciding "is this a turn". Path-length based, so it follows the actual
+    # flying whatever the survey's shape. None selects the original rule
+    # (samples per 20 m of the survey's *east-west extent*), kept only for
+    # reproducing pre-2026-11-12 results: on north-south or narrow surveys it
+    # hits its len/4 cap (~57 s on the 7/15 HaeNam file, ~5 min per M350
+    # file) and merges turns into lines -- on the combined 42-file M350 block
+    # 39 of its 84 "lines" spanned two files, and its line-spacing estimate
+    # was 59.8 m against a real ~50 m.
+    course_lag_m: float | None = 20.0
 
 
 def _net_heading_deg(x: np.ndarray, y: np.ndarray) -> float:
@@ -78,7 +88,10 @@ def detect_lines(df: pd.DataFrame, params: LineDetectionParams | None = None) ->
     # sample-to-sample one for deciding "is this a turn", since GPS jitter
     # at 10-20 Hz can easily swing the instantaneous bearing by 90+ deg on
     # its own even in dead-straight flight.
-    lag = max(1, int(round(len(x) / max(1, (x.max() - x.min()) / 20.0))) if len(x) > 1 else 1)
+    if p.course_lag_m is not None and len(step):
+        lag = max(1, int(round(p.course_lag_m / max(float(np.median(step)), 1e-3))))
+    else:
+        lag = max(1, int(round(len(x) / max(1, (x.max() - x.min()) / 20.0))) if len(x) > 1 else 1)
     lag = min(lag, max(1, len(x) // 4)) or 1
     x_fwd, y_fwd = x[lag:], y[lag:]
     x_bwd, y_bwd = x[:-lag], y[:-lag]
@@ -103,19 +116,34 @@ def detect_lines(df: pd.DataFrame, params: LineDetectionParams | None = None) ->
 
     on_azimuth = valid & (_circ_diff180(course, dominant_azimuth) <= p.angle_tolerance_deg)
 
+    # A run also ends where the travel direction reverses (> 90 deg from the
+    # run's running mean direction) while staying on the line axis: the
+    # mod-180 azimuth test alone can't see a reversal, which on a ferry
+    # survey (return leg flown back along the same axis) or with a short
+    # course lag would merge consecutive passes into one "line".
+    split_on_reversal = p.course_lag_m is not None  # legacy mode stays as it was
+    rad = np.radians(np.where(valid, course, 0.0))
+    ux, uy = np.cos(rad), np.sin(rad)
+
     line_id = np.full(len(x), -1, dtype=int)
-    current = -1
     start = None
+    sum_x = sum_y = 0.0
     next_id = 0
     for i in range(len(x)):
-        if not on_azimuth[i]:
+        reversed_here = (split_on_reversal and start is not None and on_azimuth[i]
+                         and (ux[i] * sum_x + uy[i] * sum_y) < 0.0)
+        if not on_azimuth[i] or reversed_here:
             if start is not None:
                 _finalize_run(line_id, x, y, start, i, next_id, p)
                 next_id += int(line_id[start] >= 0 and line_id[start] == next_id)
                 start = None
-            continue
+            if not on_azimuth[i]:
+                continue
         if start is None:
             start = i
+            sum_x = sum_y = 0.0
+        sum_x += ux[i]
+        sum_y += uy[i]
     if start is not None:
         _finalize_run(line_id, x, y, start, len(x), next_id, p)
 

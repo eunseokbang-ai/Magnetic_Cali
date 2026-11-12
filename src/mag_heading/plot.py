@@ -58,25 +58,63 @@ def grid_interpolate(x, y, values, resolution_m=2.0, method="cubic"):
     return gx, gy, grid_z
 
 
-def plot_2d_comparison(df, raw_col="Mag", comp_col=None, resolution_m=2.0, title=None):
+def _mask_far_cells(gx, gy, x, y, max_distance_m):
+    """NaN-out grid cells farther than max_distance_m from every sample, so the
+    map doesn't show interpolation/extrapolation where nothing was flown."""
+    from scipy.spatial import cKDTree
+
+    valid = np.isfinite(x) & np.isfinite(y)
+    tree = cKDTree(np.column_stack([x[valid], y[valid]]))
+    dist, _ = tree.query(np.column_stack([gx.ravel(), gy.ravel()]))
+    return (dist > max_distance_m).reshape(gx.shape)
+
+
+def _robust_limits(*arrays, pct=2.0):
+    vals = np.concatenate([np.asarray(a, dtype=float).ravel() for a in arrays])
+    vals = vals[np.isfinite(vals)]
+    if len(vals) == 0:
+        return 0.0, 1.0
+    lo, hi = np.percentile(vals, [pct, 100.0 - pct])
+    if hi <= lo:
+        lo, hi = float(vals.min()), float(vals.max()) + 1e-9
+    return float(lo), float(hi)
+
+
+def plot_2d_comparison(df, raw_col="Mag", comp_col=None, resolution_m=2.0, title=None,
+                       max_distance_m=20.0, clip_percentile=2.0, show_difference=True):
     """Raw vs. compensated 2D survey map, sharing a color scale (Zhang et al. Fig. 4/6 style).
 
-    If comp_col is None or not present, only the raw panel is drawn.
-    Returns the Figure; caller decides whether to save it or hand it to Streamlit.
+    If comp_col is None or not present, only the raw panel is drawn. With a
+    compensated column, a third panel shows raw - compensated (the heading
+    correction that was removed) on a symmetric diverging scale -- stripes that
+    follow flight direction there are the heading effect itself.
+
+    The shared color scale is clipped to the clip_percentile..(100-clip_percentile)
+    range of the gridded values: a handful of spikes (take-off/landing, a
+    metal object) would otherwise stretch the scale until the survey itself is
+    one flat color. Cells farther than max_distance_m from any sample are left
+    blank (None disables masking).
+    Returns the Figure; caller decides whether to save it or embed it.
     """
     x, y = local_enu(df["Latitude"], df["Longitude"])
     gx, gy, z_raw = grid_interpolate(x, y, df[raw_col], resolution_m=resolution_m)
+    far = _mask_far_cells(gx, gy, x, y, max_distance_m) if max_distance_m else None
+    if far is not None:
+        z_raw[far] = np.nan
 
     has_comp = comp_col is not None and comp_col in df.columns
     if has_comp:
         _, _, z_comp = grid_interpolate(x, y, df[comp_col], resolution_m=resolution_m)
-        vmin = min(np.nanmin(z_raw), np.nanmin(z_comp))
-        vmax = max(np.nanmax(z_raw), np.nanmax(z_comp))
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
+        if far is not None:
+            z_comp[far] = np.nan
+        vmin, vmax = _robust_limits(z_raw, z_comp, pct=clip_percentile)
+        n_panels = 3 if show_difference else 2
+        fig, axes = plt.subplots(1, n_panels, figsize=(4.6 * n_panels, 5), sharex=True, sharey=True)
         panels = [(axes[0], z_raw, "Raw"), (axes[1], z_comp, "Compensated")]
     else:
-        vmin, vmax = np.nanmin(z_raw), np.nanmax(z_raw)
+        vmin, vmax = _robust_limits(z_raw, pct=clip_percentile)
         fig, ax = plt.subplots(figsize=(6, 5))
+        axes = [ax]
         panels = [(ax, z_raw, "Raw")]
 
     im = None
@@ -85,8 +123,18 @@ def plot_2d_comparison(df, raw_col="Mag", comp_col=None, resolution_m=2.0, title
         ax.set_title(label)
         ax.set_xlabel("East (m)")
         ax.set_aspect("equal")
-    panels[0][0].set_ylabel("North (m)")
+    axes[0].set_ylabel("North (m)")
     fig.colorbar(im, ax=[p[0] for p in panels], label="nT", shrink=0.85)
+
+    if has_comp and show_difference:
+        z_diff = z_raw - z_comp
+        lim = _robust_limits(np.abs(z_diff), pct=clip_percentile)[1] or 1.0
+        ax = axes[2]
+        im_d = ax.pcolormesh(gx, gy, z_diff, vmin=-lim, vmax=lim, cmap="RdBu_r", shading="auto")
+        ax.set_title("Raw - Compensated (removed)")
+        ax.set_xlabel("East (m)")
+        ax.set_aspect("equal")
+        fig.colorbar(im_d, ax=ax, label="nT", shrink=0.85)
 
     if title:
         fig.suptitle(title)
@@ -165,5 +213,43 @@ def plot_calibration_quality(model, title=None):
 
     if title:
         ax1.set_title(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_heading_coverage(model, survey_df=None, max_points=20000, title=None):
+    """Where the survey's headings sit relative to what the calibration covers.
+
+    Azimuth (x) vs. polar angle (y). Survey samples are grey when the calibration
+    has data within its coverage threshold and red when it doesn't; the
+    calibration's own samples are drawn on top in blue. A red cluster is a heading
+    the survey flew a lot that the correction would have to extrapolate to -- the
+    picture behind the report's survey_uncovered_fraction number.
+    """
+    from .heading import compute_heading
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    if survey_df is not None:
+        theta_s, phi_s = compute_heading(
+            survey_df["CompassX"].to_numpy(),
+            survey_df["CompassY"].to_numpy(),
+            survey_df["CompassZ"].to_numpy(),
+        )
+        if len(theta_s) > max_points:
+            pick = np.random.default_rng(0).choice(len(theta_s), max_points, replace=False)
+            theta_s, phi_s = theta_s[pick], phi_s[pick]
+        uncovered = model.coverage_distance(theta_s, phi_s) > model._coverage_chord
+        ax.scatter(np.degrees(phi_s[~uncovered]), np.degrees(theta_s[~uncovered]), s=2,
+                   color="0.7", label=f"survey, covered ({np.mean(~uncovered):.0%})", rasterized=True)
+        ax.scatter(np.degrees(phi_s[uncovered]), np.degrees(theta_s[uncovered]), s=3,
+                   color="tab:red", label=f"survey, NOT covered ({np.mean(uncovered):.0%})",
+                   rasterized=True)
+    ax.scatter(np.degrees(model.phi_cal), np.degrees(model.theta_cal), s=4, color="tab:blue",
+               label="calibration", rasterized=True)
+    ax.set_xlim(-180, 180)
+    ax.set_xlabel("azimuth (deg)")
+    ax.set_ylabel("polar (deg)")
+    ax.legend(loc="upper right", markerscale=3, fontsize=8)
+    ax.set_title(title or f"heading coverage (threshold {model.coverage_threshold_deg:g} deg)")
     fig.tight_layout()
     return fig
